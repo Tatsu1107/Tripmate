@@ -1,0 +1,94 @@
+'use strict';
+
+const AWS = require('aws-sdk');
+const line = require('@line/bot-sdk');
+const dynamoDb = new AWS.DynamoDB.DocumentClient();
+
+// 環境変数の設定
+const RITCHMENYU_FINISH = process.env.RITCHMENYU_FINISH; 
+const RITCHMENYU_START = process.env.RITCHMENYU_START;
+
+// LINE Botの設定
+const config = {
+    channelAccessToken: process.env.CHANNEL_ACCESS_TOKEN,
+    channelSecret: process.env.CHANNEL_SECRET
+};
+
+// LINE SDKのクライアント
+const client = new line.Client(config);
+
+// Lambda関数のエントリーポイント
+exports.handler = async (event) => {
+    try {
+        const body = JSON.parse(event.body);
+
+        // LIFFから送信されたデータを処理
+        if (event.httpMethod === 'POST' && body.country && body.amount) {
+            const { userId, country, amount } = body;
+
+            // DynamoDBにデータを保存
+            const params = {
+                TableName: 'TravelData',
+                Item: {
+                    user_ID: userId,
+                    time: new Date().toISOString(),  // ソートキーとして時間を使用
+                    country: country,
+                    amount: amount
+                }
+            };
+
+            await dynamoDb.put(params).promise();
+
+            // 国名と所持金をユーザーに送信
+            await client.pushMessage(userId, {
+                type: 'text',
+                text: `旅行先: ${country}, 所持金: ${amount}`
+            });
+
+            return {
+                statusCode: 200,
+                body: JSON.stringify({ message: 'データが保存され、メッセージが送信されました' })
+            };
+        }
+
+        // LINEイベントがあれば処理する
+        const events = body.events;
+
+        // 各イベントに対する処理
+        const promises = events.map(async (event) => {
+            if (event.type === 'message' && event.message.type === 'text') {
+                let reply;
+
+                // リッチメニューの変更
+                if (event.message.text === '旅行開始') {
+                    await client.linkRichMenuToUser(event.source.userId, RITCHMENYU_FINISH);
+                    reply = { type: 'text', text: '旅行モードに変更しました。国名を入力してください。' };
+                } else if (event.message.text === '旅行終了') {
+                    await client.linkRichMenuToUser(event.source.userId, RITCHMENYU_START);
+                    reply = { type: 'text', text: '日常モードに変更しました。' };
+                } else {
+                    reply = { type: 'text', text: event.message.text };
+                }
+
+                // 返信メッセージをLINEに送信
+                return client.replyMessage(event.replyToken, reply);
+            }
+        });
+
+        // すべてのイベントの処理が完了するまで待機
+        await Promise.all(promises);
+
+        // Lambda用のレスポンス
+        return {
+            statusCode: 200,
+            body: JSON.stringify({ message: 'Success' })
+        };
+
+    } catch (error) {
+        console.error('Error:', error);
+        return {
+            statusCode: 500,
+            body: JSON.stringify({ message: 'データの保存中にエラーが発生しました' })
+        };
+    }
+};
